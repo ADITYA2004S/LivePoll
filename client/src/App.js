@@ -78,9 +78,13 @@ const App = () => {
     return () => clearTimeout(loaderTimer);
   }, []);
 
+  const url =
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:3001"
+      : "https://livepoll-ckdy.onrender.com";
   // Initialize socket connection
   useEffect(() => {
-    const newSocket = io("http://localhost:3001", {
+    const newSocket = io(url, {
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 10000,
