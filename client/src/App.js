@@ -78,10 +78,7 @@ const App = () => {
     return () => clearTimeout(loaderTimer);
   }, []);
 
-  const url =
-    process.env.NODE_ENV === "development"
-      ? "http://localhost:3001"
-      : "https://livepoll-ckdy.onrender.com";
+  const url = "http://localhost:3001"; // Use local server
 
   // Initialize socket connection with better error handling
   useEffect(() => {
@@ -114,7 +111,7 @@ const App = () => {
       if (poll) {
         setCurrentPoll(poll);
         setTimeLeft(
-          Math.max(0, Math.floor((new Date(poll.endTime) - new Date()) / 1000)
+          Math.max(0, Math.floor((new Date(poll.endTime) - new Date()) / 1000))
         );
       }
     };
@@ -289,7 +286,10 @@ const App = () => {
         if (response && response.success) {
           console.log("Student kicked successfully");
         } else {
-          console.error("Failed to kick student:", response ? response.error : "No response");
+          console.error(
+            "Failed to kick student:",
+            response ? response.error : "No response"
+          );
         }
       });
     }
