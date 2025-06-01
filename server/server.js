@@ -257,6 +257,51 @@ io.on("connection", (socket) => {
   });
 
   // [Rest of your socket event handlers with similar try-catch blocks...]
+  // Add this handler in your socket connection event handlers section
+  socket.on("kick-student", (studentId, callback) => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (!user || user.type !== "teacher") {
+        const error = {
+          success: false,
+          error: "Only teachers can kick students",
+        };
+        if (callback) callback(error);
+        return;
+      }
+
+      const studentSocket = io.sockets.sockets.get(studentId);
+      if (studentSocket) {
+        // Remove from data store
+        dataStore.connectedUsers.delete(studentId);
+
+        // Emit kicked event to the student
+        studentSocket.emit("kicked", { reason: "Removed by teacher" });
+
+        // Disconnect the student
+        studentSocket.disconnect(true);
+
+        // Update teachers with new student list
+        updateTeachersWithStudents();
+
+        console.log(`Student ${studentId} kicked by teacher ${socket.id}`);
+
+        if (callback) {
+          callback({ success: true });
+        }
+      } else {
+        const error = { success: false, error: "Student not found" };
+        if (callback) callback(error);
+      }
+    } catch (error) {
+      console.error("Kick student error:", error);
+      const errorResponse = {
+        success: false,
+        error: error.message || "Kick failed",
+      };
+      if (callback) callback(errorResponse);
+    }
+  });
 
   // Enhanced disconnect handler
   socket.on("disconnect", (reason) => {
