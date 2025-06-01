@@ -1,4 +1,4 @@
-require("dotenv").config({ path: "../.env" });
+require("dotenv").config({ path: "./.env" });
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
@@ -11,10 +11,7 @@ const server = http.createServer(app);
 
 const allowedOrigins =
   process.env.NODE_ENV === "production"
-    ? [
-        process.env.FRONTEND_URL,
-        "https://your-render-app.onrender.com", // Replace with your actual Render URL
-      ]
+    ? [process.env.FRONTEND_URL]
     : [
         "http://localhost:3000",
         "http://localhost:3001",
@@ -48,11 +45,11 @@ app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 
 // Serve static files from React app
 if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../frontend/build")));
+  app.use(express.static(path.join(__dirname, "../client/build")));
 
   // Handle React routing, return all requests to React app
   app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../frontend/build", "index.html"));
+    res.sendFile(path.join(__dirname, "../client/build", "index.html"));
   });
 } else {
   app.use(express.static("public"));
@@ -110,13 +107,6 @@ app.get("/api/health", (req, res) => {
     console.error("Health check error:", error);
     res.status(500).json({ status: "ERROR", error: error.message });
   }
-});
-// Serve static frontend files
-app.use(express.static(path.join(__dirname, "../client/build")));
-
-// Handle React routing
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../client/build", "index.html"));
 });
 
 // Socket.IO connection handling with robust error management
