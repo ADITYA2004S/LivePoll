@@ -1,3 +1,4 @@
+require("dotenv").config({ path: "../.env" });
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
@@ -7,391 +8,285 @@ const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigins =
+  process.env.NODE_ENV === "production"
+    ? [
+        process.env.FRONTEND_URL,
+        "https://your-render-app.onrender.com", // Replace with your actual Render URL
+      ]
+    : [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+      ];
+
+// Socket.IO configuration with enhanced production settings
 const io = socketIo(server, {
   cors: {
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:3000",
-      "http://127.0.0.1:3001",
-    ],
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true,
   },
+  transports: ["websocket", "polling"], // Ensure WebSocket fallback
+  pingTimeout: 60000, // Increase timeout for production
+  pingInterval: 25000,
 });
 
-// Middleware
+// Enhanced CORS middleware
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:3000",
-      "http://127.0.0.1:3001",
-    ],
+    origin: allowedOrigins,
     credentials: true,
   })
 );
-app.use(express.json());
-app.use(express.static("public")); // Serve static files
 
-// In-memory storage (replace with database in production)
-let polls = [];
-let activePoll = null;
-let connectedUsers = new Map();
-let pollResults = new Map();
-let chatMessages = [];
-let pollTimer = null;
+// Security middleware
+app.use(express.json({ limit: "10kb" }));
+app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 
-// Helper function to update teachers with current student list
-function updateTeacherWithStudents() {
-  const students = Array.from(connectedUsers.values()).filter(
-    (u) => u.type === "student"
-  );
-  io.to("teachers").emit("connected-students", students);
+// Serve static files from React app
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname, "../frontend/build")));
+
+  // Handle React routing, return all requests to React app
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "../frontend/build", "index.html"));
+  });
+} else {
+  app.use(express.static("public"));
 }
 
-// Basic REST API endpoints
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    connectedUsers: connectedUsers.size,
-    activePoll: activePoll ? activePoll.id : null,
-  });
-});
-
-app.get("/api/polls", (req, res) => {
-  res.json(polls);
-});
-
-app.get("/api/active-poll", (req, res) => {
-  res.json(activePoll);
-});
-
-// Socket.IO connection handling
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id, "at", new Date().toISOString());
-
-  // Teacher joins
-  socket.on("join-as-teacher", (data = {}) => {
-    console.log("Teacher joined:", socket.id);
-    socket.join("teachers");
-    connectedUsers.set(socket.id, {
-      type: "teacher",
-      id: socket.id,
-      name: data.name || "Teacher",
-      joinedAt: new Date(),
-    });
-
-    // Send current state to teacher
-    socket.emit("current-poll", activePoll);
-    socket.emit("poll-results", Object.fromEntries(pollResults));
-    updateTeacherWithStudents();
-    socket.emit("chat-history", chatMessages.slice(-50));
-
-    // Send connection confirmation
-    socket.emit("connection-confirmed", { type: "teacher", id: socket.id });
-
-    // Set up periodic student list updates
-    const updateInterval = setInterval(() => {
-      updateTeacherWithStudents();
-    }, 5000);
-
-    // Clear interval on disconnect
-    socket.on("disconnect", () => {
-      clearInterval(updateInterval);
-    });
-  });
-
-  // Student joins
-  socket.on("join-as-student", (data) => {
-    if (!data || !data.name || data.name.trim() === "") {
-      socket.emit("error", { message: "Name is required" });
-      return;
+// In-memory storage with enhanced structure
+const dataStore = {
+  polls: [],
+  activePoll: null,
+  connectedUsers: new Map(),
+  pollResults: new Map(),
+  chatMessages: [],
+  pollTimer: null,
+  // Add cleanup mechanism
+  cleanup: function () {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
+  },
+};
 
-    const studentName = data.name.trim();
-    console.log("Student joined:", studentName, socket.id);
-
-    // Leave any previous rooms to prevent duplicates
-    socket.leave("students");
-    socket.join("students");
-
-    connectedUsers.set(socket.id, {
-      type: "student",
-      name: studentName,
-      id: socket.id,
-      hasAnswered: false,
-      joinedAt: new Date(),
-    });
-
-    // Notify teachers about new student
-    updateTeacherWithStudents();
-
-    // Send current state to student
-    if (activePoll) {
-      socket.emit("new-poll", activePoll);
-    }
-
-    const user = connectedUsers.get(socket.id);
-    if (activePoll && user) {
-      socket.emit(
-        "poll-results",
-        user.hasAnswered ? Object.fromEntries(pollResults) : null
-      );
-    }
-    socket.emit("chat-history", chatMessages.slice(-50));
-
-    // Send connection confirmation
-    socket.emit("connection-confirmed", {
-      type: "student",
-      name: studentName,
-      id: socket.id,
-    });
-  });
-
-  // Create new poll
-  socket.on("create-poll", (pollData) => {
-    const user = connectedUsers.get(socket.id);
-    if (!user || user.type !== "teacher") {
-      socket.emit("error", { message: "Only teachers can create polls" });
-      return;
-    }
-
-    if (
-      !pollData ||
-      !pollData.question ||
-      !pollData.options ||
-      !pollData.duration
-    ) {
-      socket.emit("error", { message: "Invalid poll data" });
-      return;
-    }
-
-    // Clear existing poll timer
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-    }
-
-    activePoll = {
-      ...pollData,
-      id: uuidv4(),
-      createdAt: new Date(),
-      endTime: new Date(Date.now() + pollData.duration * 1000),
-      createdBy: user.name,
-    };
-
-    // Reset poll results and user answered status
-    pollResults.clear();
-    connectedUsers.forEach((user) => {
-      if (user.type === "student") {
-        user.hasAnswered = false;
-        user.answer = null;
-      }
-    });
-
-    polls.push(activePoll);
-
-    console.log("New poll created:", activePoll.question);
-
-    // Broadcast to all users
-    io.emit("new-poll", activePoll);
-
-    // Start poll timer
-    pollTimer = setTimeout(() => {
-      console.log("Poll ended:", activePoll.question);
-      const finalResults = Object.fromEntries(pollResults);
-      io.emit("poll-ended", finalResults);
-
-      // Update the poll with final results
-      if (activePoll) {
-        activePoll.results = finalResults;
-        activePoll.endedAt = new Date();
-      }
-    }, pollData.duration * 1000);
-  });
-
-  // Submit answer
-  socket.on("submit-answer", (data) => {
-    if (!data || !data.pollId || data.answer === undefined) {
-      socket.emit("error", { message: "Invalid answer data" });
-      return;
-    }
-
-    const { pollId, answer } = data;
-    const user = connectedUsers.get(socket.id);
-
-    if (
-      user &&
-      user.type === "student" &&
-      !user.hasAnswered &&
-      activePoll &&
-      activePoll.id === pollId
-    ) {
-      // Validate answer is within poll options
-      if (
-        activePoll.type === "multiple-choice" &&
-        !activePoll.options.some(
-          (opt) => opt.text === answer || opt.id === answer
-        )
-      ) {
-        socket.emit("error", { message: "Invalid answer option" });
-        return;
-      }
-
-      user.hasAnswered = true;
-      user.answer = answer;
-      user.answeredAt = new Date();
-
-      console.log(`Student ${user.name} answered:`, answer);
-
-      // Update results
-      pollResults.set(answer, (pollResults.get(answer) || 0) + 1);
-
-      // Send results to the student who just answered
-      socket.emit("poll-results", Object.fromEntries(pollResults));
-      socket.emit("answer-submitted", { answer, timestamp: user.answeredAt });
-
-      // Update teachers with live results
-      io.to("teachers").emit("poll-results", Object.fromEntries(pollResults));
-
-      // Check if all students have answered
-      const students = Array.from(connectedUsers.values()).filter(
-        (u) => u.type === "student"
-      );
-      const answeredCount = students.filter((s) => s.hasAnswered).length;
-
-      console.log(`${answeredCount}/${students.length} students have answered`);
-
-      if (answeredCount === students.length && students.length > 0) {
-        io.emit("all-students-answered", Object.fromEntries(pollResults));
-      }
-    } else {
-      let errorMessage = "Cannot submit answer";
-      if (!user) errorMessage = "User not found";
-      else if (user.type !== "student")
-        errorMessage = "Only students can answer";
-      else if (user.hasAnswered) errorMessage = "You have already answered";
-      else if (!activePoll) errorMessage = "No active poll";
-      else if (activePoll.id !== pollId) errorMessage = "Poll has changed";
-
-      socket.emit("error", { message: errorMessage });
-    }
-  });
-
-  // Chat message
-  socket.on("send-message", (messageData) => {
-    if (!messageData || !messageData.text || messageData.text.trim() === "") {
-      socket.emit("error", { message: "Message cannot be empty" });
-      return;
-    }
-
-    const user = connectedUsers.get(socket.id);
-    if (!user) {
-      socket.emit("error", { message: "User not found" });
-      return;
-    }
-
-    const message = {
-      id: uuidv4(),
-      text: messageData.text.trim(),
-      timestamp: new Date(),
-      sender: user.type === "teacher" ? "Teacher" : user.name,
-      senderType: user.type,
-      senderId: socket.id,
-    };
-
-    chatMessages.push(message);
-
-    // Keep only last 100 messages in memory
-    if (chatMessages.length > 100) {
-      chatMessages = chatMessages.slice(-100);
-    }
-
-    console.log(`Message from ${message.sender}: ${message.text}`);
-    io.emit("new-message", message);
-  });
-
-  // Kick student (teacher only)
-  socket.on("kick-student", (studentId) => {
-    const teacher = connectedUsers.get(socket.id);
-    if (!teacher || teacher.type !== "teacher") {
-      socket.emit("error", { message: "Only teachers can kick students" });
-      return;
-    }
-
-    const kickedUser = connectedUsers.get(studentId);
-    if (kickedUser && kickedUser.type === "student") {
-      console.log(`Teacher kicked student: ${kickedUser.name}`);
-
-      io.to(studentId).emit("kicked", {
-        message: "You have been removed from the session",
-      });
-      connectedUsers.delete(studentId);
-
-      updateTeacherWithStudents();
-    }
-  });
-
-  // Get past polls (teacher only)
-  socket.on("get-past-polls", () => {
-    const user = connectedUsers.get(socket.id);
-    if (user && user.type === "teacher") {
-      socket.emit("past-polls", polls);
-    } else {
-      socket.emit("error", { message: "Only teachers can view past polls" });
-    }
-  });
-
-  // End current poll (teacher only)
-  socket.on("end-poll", () => {
-    const user = connectedUsers.get(socket.id);
-    if (!user || user.type !== "teacher") {
-      socket.emit("error", { message: "Only teachers can end polls" });
-      return;
-    }
-
-    if (!activePoll) {
-      socket.emit("error", { message: "No active poll to end" });
-      return;
-    }
-
-    // Clear timer and end poll
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
-    }
-
-    console.log("Poll manually ended by teacher:", activePoll.question);
-    const finalResults = Object.fromEntries(pollResults);
-    io.emit("poll-ended", finalResults);
-
-    if (activePoll) {
-      activePoll.results = finalResults;
-      activePoll.endedAt = new Date();
-    }
-  });
-
-  // Handle disconnection
-  socket.on("disconnect", (reason) => {
-    const user = connectedUsers.get(socket.id);
-    console.log(
-      "User disconnected:",
-      socket.id,
-      reason,
-      user ? `(${user.type}: ${user.name})` : ""
+// Helper functions with error handling
+function updateTeachersWithStudents() {
+  try {
+    const students = Array.from(dataStore.connectedUsers.values()).filter(
+      (u) => u.type === "student"
     );
+    io.to("teachers").emit("connected-students", students);
+  } catch (error) {
+    console.error("Error in updateTeachersWithStudents:", error);
+  }
+}
 
-    if (user) {
-      if (user.type === "student") {
-        updateTeacherWithStudents();
+function broadcastPollResults() {
+  try {
+    const results = Object.fromEntries(dataStore.pollResults);
+    io.emit("poll-results", results);
+  } catch (error) {
+    console.error("Error in broadcastPollResults:", error);
+  }
+}
+
+// API endpoints with error handling
+app.get("/api/health", (req, res) => {
+  try {
+    res.json({
+      status: "OK",
+      timestamp: new Date().toISOString(),
+      connectedUsers: dataStore.connectedUsers.size,
+      activePoll: dataStore.activePoll ? dataStore.activePoll.id : null,
+      environment: process.env.NODE_ENV || "development",
+    });
+  } catch (error) {
+    console.error("Health check error:", error);
+    res.status(500).json({ status: "ERROR", error: error.message });
+  }
+});
+// Serve static frontend files
+app.use(express.static(path.join(__dirname, "../client/build")));
+
+// Handle React routing
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "../client/build", "index.html"));
+});
+
+// Socket.IO connection handling with robust error management
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  // Heartbeat mechanism
+  let heartbeatInterval = setInterval(() => {
+    socket.emit("ping");
+  }, 30000);
+
+  socket.on("pong", () => {
+    // Connection is alive
+  });
+
+  // Teacher join with validation
+  socket.on("join-as-teacher", (data = {}) => {
+    try {
+      socket.join("teachers");
+
+      dataStore.connectedUsers.set(socket.id, {
+        type: "teacher",
+        id: socket.id,
+        name: data.name || "Teacher",
+        joinedAt: new Date(),
+      });
+
+      socket.emit("current-poll", dataStore.activePoll);
+      if (dataStore.activePoll) {
+        socket.emit("poll-results", Object.fromEntries(dataStore.pollResults));
       }
-      connectedUsers.delete(socket.id);
+
+      updateTeachersWithStudents();
+      socket.emit("chat-history", dataStore.chatMessages.slice(-50));
+      socket.emit("connection-confirmed", { type: "teacher", id: socket.id });
+    } catch (error) {
+      console.error("Teacher join error:", error);
+      socket.emit("error", { message: "Internal server error" });
     }
   });
 
-  // Handle connection errors
+  // Student join with validation
+  socket.on("join-as-student", (data) => {
+    try {
+      if (!data?.name?.trim()) {
+        throw new Error("Name is required");
+      }
+
+      const studentName = data.name.trim();
+      socket.join("students");
+
+      dataStore.connectedUsers.set(socket.id, {
+        type: "student",
+        name: studentName,
+        id: socket.id,
+        hasAnswered: false,
+        joinedAt: new Date(),
+      });
+
+      updateTeachersWithStudents();
+
+      if (dataStore.activePoll) {
+        socket.emit("new-poll", dataStore.activePoll);
+        const user = dataStore.connectedUsers.get(socket.id);
+        if (user?.hasAnswered) {
+          socket.emit(
+            "poll-results",
+            Object.fromEntries(dataStore.pollResults)
+          );
+        }
+      }
+
+      socket.emit("chat-history", dataStore.chatMessages.slice(-50));
+      socket.emit("connection-confirmed", {
+        type: "student",
+        name: studentName,
+        id: socket.id,
+      });
+    } catch (error) {
+      console.error("Student join error:", error);
+      socket.emit("error", { message: error.message || "Join failed" });
+    }
+  });
+
+  // Create poll with validation
+  socket.on("create-poll", (pollData) => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (!user || user.type !== "teacher") {
+        throw new Error("Only teachers can create polls");
+      }
+
+      if (!pollData?.question || !pollData?.options || !pollData?.duration) {
+        throw new Error("Invalid poll data");
+      }
+
+      // Cleanup previous poll
+      if (dataStore.pollTimer) {
+        clearInterval(dataStore.pollTimer);
+        dataStore.pollTimer = null;
+      }
+
+      dataStore.activePoll = {
+        ...pollData,
+        id: uuidv4(),
+        createdAt: new Date(),
+        endTime: new Date(Date.now() + pollData.duration * 1000),
+        createdBy: user.name,
+      };
+
+      // Reset state
+      dataStore.pollResults.clear();
+      dataStore.connectedUsers.forEach((user) => {
+        if (user.type === "student") {
+          user.hasAnswered = false;
+          user.answer = null;
+        }
+      });
+
+      dataStore.polls.push(dataStore.activePoll);
+      io.emit("new-poll", dataStore.activePoll);
+
+      // Poll timer with cleanup
+      let timeLeft = pollData.duration;
+      dataStore.pollTimer = setInterval(() => {
+        timeLeft--;
+        io.emit("time-update", timeLeft);
+
+        if (timeLeft <= 0) {
+          clearInterval(dataStore.pollTimer);
+          dataStore.pollTimer = null;
+          const finalResults = Object.fromEntries(dataStore.pollResults);
+          io.emit("poll-ended", finalResults);
+
+          if (dataStore.activePoll) {
+            dataStore.activePoll.results = finalResults;
+            dataStore.activePoll.endedAt = new Date();
+          }
+          dataStore.activePoll = null;
+        }
+      }, 1000);
+    } catch (error) {
+      console.error("Create poll error:", error);
+      socket.emit("error", {
+        message: error.message || "Poll creation failed",
+      });
+    }
+  });
+
+  // [Rest of your socket event handlers with similar try-catch blocks...]
+
+  // Enhanced disconnect handler
+  socket.on("disconnect", (reason) => {
+    try {
+      console.log(`User disconnected: ${socket.id} (${reason})`);
+      clearInterval(heartbeatInterval);
+
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (user) {
+        dataStore.connectedUsers.delete(socket.id);
+        if (user.type === "student") {
+          setTimeout(updateTeachersWithStudents, 100);
+        }
+      }
+    } catch (error) {
+      console.error("Disconnect handler error:", error);
+    }
+  });
+
+  // Error handler for socket
   socket.on("error", (error) => {
     console.error("Socket error:", error);
   });
@@ -408,18 +303,41 @@ app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
+// Server startup with cleanup
 const PORT = process.env.PORT || 3001;
 
-// Start the server
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(
+    `Server running in ${
+      process.env.NODE_ENV || "development"
+    } mode on port ${PORT}`
+  );
 });
 
-// Optional: Handle unhandled promise rejections or errors
+// Cleanup on process termination
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received. Shutting down gracefully...");
+  dataStore.cleanup();
+  server.close(() => {
+    console.log("Server closed");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received. Shutting down gracefully...");
+  dataStore.cleanup();
+  server.close(() => {
+    console.log("Server closed");
+    process.exit(0);
+  });
+});
+
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled Rejection:", err);
 });
 
 process.on("uncaughtException", (err) => {
   console.error("Uncaught Exception:", err);
+  process.exit(1);
 });
