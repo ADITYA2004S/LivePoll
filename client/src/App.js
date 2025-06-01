@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Users,
   MessageCircle,
@@ -13,10 +13,16 @@ import {
   ArrowRight,
   Star,
   CheckCircle,
+  Code,
+  User,
+  Home,
+  Mail,
 } from "lucide-react";
 import io from "socket.io-client";
 import TeacherDashboard from "./components/TeacherDashboard";
 import StudentView from "./components/StudentView";
+import Loader from "./components/loader";
+import Developer from "./components/developer";
 
 const Chat = ({ messages, onSendMessage, onClose, userType, studentName }) => (
   <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -46,71 +52,181 @@ const App = () => {
   const [chatMessages, setChatMessages] = useState([]);
   const [pastPolls, setPastPolls] = useState([]);
   const [showPastPolls, setShowPastPolls] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [showContent, setShowContent] = useState(false);
+  const [showDeveloperPage, setShowDeveloperPage] = useState(false);
+  const [isStudentInputFocused, setIsStudentInputFocused] = useState(false);
+  const studentInputRef = useRef(null);
+
+  // Load saved state from localStorage
+  useEffect(() => {
+    const savedUserType = localStorage.getItem("userType");
+    const savedStudentName = localStorage.getItem("studentName");
+
+    if (savedUserType) {
+      setUserType(savedUserType);
+      if (savedUserType === "student" && savedStudentName) {
+        setStudentName(savedStudentName);
+      }
+    }
+
+    const loaderTimer = setTimeout(() => {
+      setIsLoading(false);
+      setTimeout(() => setShowContent(true), 100);
+    }, 3000);
+
+    return () => clearTimeout(loaderTimer);
+  }, []);
 
   // Initialize socket connection
   useEffect(() => {
-    const newSocket = io("http://localhost:5000"); // Replace with your server URL
-    setSocket(newSocket);
+    const newSocket = io("http://localhost:3001", {
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 10000,
+    });
 
-    // Socket event listeners
+    const socketErrorHandler = (error) => {
+      console.error("Socket error:", error);
+      alert(error.message || "An error occurred");
+    };
+
+    const connectionConfirmedHandler = (data) => {
+      console.log("Connection confirmed:", data);
+    };
+
+    const newPollHandler = (poll) => {
+      console.log("New poll received:", poll);
+      setCurrentPoll(poll);
+      setPollResults({});
+      setTimeLeft(poll.duration);
+      setHasAnswered(false);
+      setSelectedAnswer("");
+    };
+
+    const currentPollHandler = (poll) => {
+      if (poll) {
+        setCurrentPoll(poll);
+        setTimeLeft(
+          Math.max(0, Math.floor((new Date(poll.endTime) - new Date()) / 1000))
+        );
+      }
+    };
+
+    const pollResultsHandler = (results) => {
+      console.log("Poll results received:", results);
+      setPollResults(results || {});
+    };
+
+    const pollEndedHandler = (results) => {
+      console.log("Poll ended:", results);
+      setPollResults(results || {});
+      setCurrentPoll(null);
+      setTimeLeft(0);
+    };
+
+    const connectedStudentsHandler = (students) => {
+      console.log("Connected students update:", students);
+      setConnectedStudents(students || []);
+    };
+
+    const newMessageHandler = (message) => {
+      setChatMessages((prev) => [...prev, message]);
+    };
+
+    const chatHistoryHandler = (messages) => {
+      setChatMessages(messages || []);
+    };
+
+    const pastPollsHandler = (polls) => {
+      setPastPolls(polls || []);
+    };
+
+    const kickedHandler = (data) => {
+      alert("You have been removed from the session");
+      setUserType(null);
+      setStudentName("");
+      localStorage.removeItem("userType");
+      localStorage.removeItem("studentName");
+    };
+
+    const answerSubmittedHandler = (data) => {
+      console.log("Answer submitted:", data);
+    };
+
+    const allStudentsAnsweredHandler = (results) => {
+      console.log("All students have answered");
+      setPollResults(results || {});
+    };
+
     newSocket.on("connect", () => {
       console.log("Connected to server");
+      setSocket(newSocket);
+
+      // Rejoin as teacher or student if we have saved state
+      const savedUserType = localStorage.getItem("userType");
+      const savedStudentName = localStorage.getItem("studentName");
+
+      if (savedUserType === "teacher") {
+        newSocket.emit("join-as-teacher");
+        newSocket.emit("get-past-polls");
+      } else if (savedUserType === "student" && savedStudentName) {
+        newSocket.emit("join-as-student", { name: savedStudentName });
+      }
     });
 
     newSocket.on("disconnect", () => {
       console.log("Disconnected from server");
     });
 
-    newSocket.on("poll-created", (poll) => {
-      setCurrentPoll(poll);
-      setPollResults({});
-      setTimeLeft(poll.duration);
-      setHasAnswered(false);
-      setSelectedAnswer("");
-    });
+    newSocket.on("error", socketErrorHandler);
+    newSocket.on("connection-confirmed", connectionConfirmedHandler);
+    newSocket.on("new-poll", newPollHandler);
+    newSocket.on("current-poll", currentPollHandler);
+    newSocket.on("poll-results", pollResultsHandler);
+    newSocket.on("poll-ended", pollEndedHandler);
+    newSocket.on("connected-students", connectedStudentsHandler);
+    newSocket.on("new-message", newMessageHandler);
+    newSocket.on("chat-history", chatHistoryHandler);
+    newSocket.on("past-polls", pastPollsHandler);
+    newSocket.on("kicked", kickedHandler);
+    newSocket.on("answer-submitted", answerSubmittedHandler);
+    newSocket.on("all-students-answered", allStudentsAnsweredHandler);
 
-    newSocket.on("poll-results", (results) => {
-      setPollResults(results);
-    });
-
-    newSocket.on("time-update", (time) => {
-      setTimeLeft(time);
-    });
-
-    newSocket.on("poll-ended", () => {
-      setCurrentPoll(null);
-      setTimeLeft(0);
-    });
-
-    newSocket.on("students-update", (students) => {
-      setConnectedStudents(students);
-    });
-
-    newSocket.on("chat-message", (message) => {
-      setChatMessages((prev) => [...prev, message]);
-    });
-
-    newSocket.on("past-polls", (polls) => {
-      setPastPolls(polls);
-    });
-
-    newSocket.on("student-kicked", (data) => {
-      if (userType === "student" && data.studentId === newSocket.id) {
-        alert("You have been removed from the session");
-        setUserType(null);
-        setStudentName("");
-      }
-    });
-
-    // Cleanup on unmount
     return () => {
+      newSocket.off("connect");
+      newSocket.off("disconnect");
+      newSocket.off("error", socketErrorHandler);
+      newSocket.off("connection-confirmed", connectionConfirmedHandler);
+      newSocket.off("new-poll", newPollHandler);
+      newSocket.off("current-poll", currentPollHandler);
+      newSocket.off("poll-results", pollResultsHandler);
+      newSocket.off("poll-ended", pollEndedHandler);
+      newSocket.off("connected-students", connectedStudentsHandler);
+      newSocket.off("new-message", newMessageHandler);
+      newSocket.off("chat-history", chatHistoryHandler);
+      newSocket.off("past-polls", pastPollsHandler);
+      newSocket.off("kicked", kickedHandler);
+      newSocket.off("answer-submitted", answerSubmittedHandler);
+      newSocket.off("all-students-answered", allStudentsAnsweredHandler);
       newSocket.close();
     };
-  }, [userType]);
+  }, []);
+
+  // Timer effect for countdown
+  useEffect(() => {
+    if (currentPoll && timeLeft > 0) {
+      const timer = setTimeout(() => {
+        setTimeLeft((prev) => Math.max(0, prev - 1));
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [timeLeft, currentPoll]);
 
   const handleTeacherLogin = () => {
     if (socket) {
       setUserType("teacher");
+      localStorage.setItem("userType", "teacher");
       socket.emit("join-as-teacher");
       socket.emit("get-past-polls");
     }
@@ -119,12 +235,15 @@ const App = () => {
   const handleStudentLogin = () => {
     if (studentName.trim() && socket) {
       setUserType("student");
-      socket.emit("join-as-student", { name: studentName });
+      localStorage.setItem("userType", "student");
+      localStorage.setItem("studentName", studentName.trim());
+      socket.emit("join-as-student", { name: studentName.trim() });
     }
   };
 
   const handleCreatePoll = (poll) => {
     if (socket) {
+      console.log("Creating poll:", poll);
       socket.emit("create-poll", poll);
     }
   };
@@ -133,6 +252,7 @@ const App = () => {
     setHasAnswered(true);
     setSelectedAnswer(answer);
     if (socket && currentPoll) {
+      console.log("Submitting answer:", answer);
       socket.emit("submit-answer", { pollId: currentPoll.id, answer: answer });
     }
   };
@@ -147,6 +267,16 @@ const App = () => {
   const kickStudent = (studentId) => {
     if (socket) {
       socket.emit("kick-student", studentId);
+    }
+  };
+
+  const handleGoHome = () => {
+    setUserType(null);
+    setStudentName("");
+    localStorage.removeItem("userType");
+    localStorage.removeItem("studentName");
+    if (socket) {
+      socket.emit("leave-session");
     }
   };
 
@@ -167,9 +297,32 @@ const App = () => {
     return answeredCount >= studentsCount || timeLeft <= 0;
   };
 
+  if (isLoading) {
+    return <Loader />;
+  }
+
+  // Show Developer page
+  if (showDeveloperPage) {
+    return <Developer onBack={() => setShowDeveloperPage(false)} />;
+  }
+
   if (!userType) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 relative overflow-hidden">
+      <div
+        className={`min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 relative overflow-hidden transition-opacity duration-500 ${
+          showContent ? "opacity-100" : "opacity-0"
+        }`}
+      >
+        {/* About Developer Button - Top Right Corner */}
+        <button
+          onClick={() => setShowDeveloperPage(true)}
+          className="absolute top-6 right-6 z-50 group px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-semibold rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 flex items-center space-x-2"
+        >
+          <User className="w-5 h-5" />
+          <span>About Developer</span>
+          <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+        </button>
+
         {/* Animated Background Elements */}
         <div className="absolute inset-0">
           <div className="absolute top-20 left-10 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
@@ -217,7 +370,7 @@ const App = () => {
               {/* Left Side - Hero Content */}
               <div className="text-center lg:text-left space-y-8">
                 <div className="space-y-6">
-                  <div className="inline-flex items-center space-x-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-2 border border-white/20">
+                  <div className="inline-flex items-center space-x-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-2 border border-white/20 animate-fade-in">
                     <Sparkles className="w-4 h-4 text-yellow-300" />
                     <span className="text-white/90 text-sm font-medium">
                       Revolutionary Polling Experience
@@ -315,7 +468,12 @@ const App = () => {
                       <div className="space-y-4">
                         <button
                           onClick={handleTeacherLogin}
-                          className="group w-full py-4 px-6 rounded-2xl font-bold text-white transition-all duration-300 hover:scale-105 active:scale-95 shadow-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 relative overflow-hidden"
+                          disabled={isStudentInputFocused}
+                          className={`group w-full py-4 px-6 rounded-2xl font-bold text-white transition-all duration-300 hover:scale-105 active:scale-95 shadow-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 relative overflow-hidden ${
+                            isStudentInputFocused
+                              ? "opacity-50 cursor-not-allowed"
+                              : ""
+                          }`}
                         >
                           <div className="absolute inset-0 bg-gradient-to-r from-purple-400 to-indigo-400 opacity-0 group-hover:opacity-20 transition-opacity duration-300"></div>
                           <div className="relative flex items-center justify-center space-x-3">
@@ -328,6 +486,7 @@ const App = () => {
                         <div className="relative">
                           <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-500 rounded-2xl opacity-20 blur-sm"></div>
                           <input
+                            ref={studentInputRef}
                             type="text"
                             placeholder="Enter your name as student"
                             value={studentName}
@@ -336,6 +495,8 @@ const App = () => {
                             onKeyPress={(e) =>
                               e.key === "Enter" && handleStudentLogin()
                             }
+                            onFocus={() => setIsStudentInputFocused(true)}
+                            onBlur={() => setIsStudentInputFocused(false)}
                           />
                         </div>
 
@@ -421,6 +582,14 @@ const App = () => {
             >
               <MessageCircle className="w-6 h-6" />
             </button>
+            <button
+              onClick={handleGoHome}
+              className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+              style={{ color: "#7765DA" }}
+              title="Go back to home"
+            >
+              <Home className="w-6 h-6" />
+            </button>
           </div>
         </div>
       </header>
@@ -471,9 +640,22 @@ const App = () => {
             </div>
 
             <div className="flex-1 overflow-y-auto p-6">
-              <div className="text-center py-8">
-                <p className="text-gray-500">No past polls found</p>
-              </div>
+              {pastPolls.length > 0 ? (
+                <div className="space-y-4">
+                  {pastPolls.map((poll) => (
+                    <div key={poll.id} className="p-4 border rounded-lg">
+                      <h4 className="font-bold">{poll.question}</h4>
+                      <p className="text-sm text-gray-500">
+                        {new Date(poll.createdAt).toLocaleString()}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">No past polls found</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
