@@ -256,8 +256,59 @@ io.on("connection", (socket) => {
     }
   });
 
-  // [Rest of your socket event handlers with similar try-catch blocks...]
-  // Add this handler in your socket connection event handlers section
+  // Submit answer handler - THIS WAS MISSING
+  socket.on("submit-answer", (data) => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (!user || user.type !== "student") {
+        throw new Error("Only students can submit answers");
+      }
+
+      if (!dataStore.activePoll) {
+        throw new Error("No active poll");
+      }
+
+      if (!data?.answer) {
+        throw new Error("Answer is required");
+      }
+
+      // Mark user as answered
+      user.hasAnswered = true;
+      user.answer = data.answer;
+
+      // Update poll results
+      const currentCount = dataStore.pollResults.get(data.answer) || 0;
+      dataStore.pollResults.set(data.answer, currentCount + 1);
+
+      console.log(`Student ${user.name} submitted answer: ${data.answer}`);
+
+      // Broadcast updated results to all users
+      broadcastPollResults();
+
+      // Notify that answer was submitted
+      socket.emit("answer-submitted", { success: true });
+
+      // Check if all students have answered
+      const totalStudents = Array.from(
+        dataStore.connectedUsers.values()
+      ).filter((u) => u.type === "student").length;
+      const answeredCount = Array.from(
+        dataStore.connectedUsers.values()
+      ).filter((u) => u.type === "student" && u.hasAnswered).length;
+
+      if (answeredCount >= totalStudents && totalStudents > 0) {
+        const finalResults = Object.fromEntries(dataStore.pollResults);
+        io.emit("all-students-answered", finalResults);
+      }
+    } catch (error) {
+      console.error("Submit answer error:", error);
+      socket.emit("error", {
+        message: error.message || "Answer submission failed",
+      });
+    }
+  });
+
+  // Kick student handler - THIS WAS MISSING
   socket.on("kick-student", (studentId, callback) => {
     try {
       const user = dataStore.connectedUsers.get(socket.id);
@@ -300,6 +351,68 @@ io.on("connection", (socket) => {
         error: error.message || "Kick failed",
       };
       if (callback) callback(errorResponse);
+    }
+  });
+
+  // Send message handler - THIS WAS MISSING
+  socket.on("send-message", (messageData) => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (!user) {
+        throw new Error("User not found");
+      }
+
+      const message = {
+        id: uuidv4(),
+        text: messageData.text,
+        type: user.type,
+        name: user.name,
+        timestamp: new Date(),
+      };
+
+      dataStore.chatMessages.push(message);
+
+      // Keep only last 100 messages
+      if (dataStore.chatMessages.length > 100) {
+        dataStore.chatMessages = dataStore.chatMessages.slice(-100);
+      }
+
+      io.emit("new-message", message);
+    } catch (error) {
+      console.error("Send message error:", error);
+      socket.emit("error", { message: error.message || "Message send failed" });
+    }
+  });
+
+  // Get past polls handler - THIS WAS MISSING
+  socket.on("get-past-polls", () => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (!user || user.type !== "teacher") {
+        socket.emit("error", { message: "Only teachers can view past polls" });
+        return;
+      }
+
+      socket.emit("past-polls", dataStore.polls);
+    } catch (error) {
+      console.error("Get past polls error:", error);
+      socket.emit("error", { message: "Failed to get past polls" });
+    }
+  });
+
+  // Leave session handler - THIS WAS MISSING
+  socket.on("leave-session", () => {
+    try {
+      const user = dataStore.connectedUsers.get(socket.id);
+      if (user) {
+        dataStore.connectedUsers.delete(socket.id);
+        if (user.type === "student") {
+          updateTeachersWithStudents();
+        }
+        console.log(`User ${socket.id} left session`);
+      }
+    } catch (error) {
+      console.error("Leave session error:", error);
     }
   });
 
