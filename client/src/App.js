@@ -78,15 +78,16 @@ const App = () => {
     return () => clearTimeout(loaderTimer);
   }, []);
 
-  const url = "http://localhost:3001"; // Use local server
-
-  // Initialize socket connection with better error handling
+  const url =
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:3001"
+      : "https://livepoll-ckdy.onrender.com";
+  // Initialize socket connection
   useEffect(() => {
     const newSocket = io(url, {
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 10000,
-      transports: ["websocket"], // Force WebSocket transport
     });
 
     const socketErrorHandler = (error) => {
@@ -151,9 +152,6 @@ const App = () => {
       setStudentName("");
       localStorage.removeItem("userType");
       localStorage.removeItem("studentName");
-      if (socket) {
-        socket.disconnect();
-      }
     };
 
     const answerSubmittedHandler = (data) => {
@@ -181,16 +179,8 @@ const App = () => {
       }
     });
 
-    newSocket.on("disconnect", (reason) => {
-      console.log("Disconnected from server:", reason);
-      if (reason === "io server disconnect") {
-        // The server forcefully disconnected the socket
-        newSocket.connect();
-      }
-    });
-
-    newSocket.on("connect_error", (err) => {
-      console.error("Connection error:", err);
+    newSocket.on("disconnect", () => {
+      console.log("Disconnected from server");
     });
 
     newSocket.on("error", socketErrorHandler);
@@ -210,7 +200,6 @@ const App = () => {
     return () => {
       newSocket.off("connect");
       newSocket.off("disconnect");
-      newSocket.off("connect_error");
       newSocket.off("error", socketErrorHandler);
       newSocket.off("connection-confirmed", connectionConfirmedHandler);
       newSocket.off("new-poll", newPollHandler);
@@ -281,17 +270,7 @@ const App = () => {
 
   const kickStudent = (studentId) => {
     if (socket) {
-      console.log("Attempting to kick student:", studentId);
-      socket.emit("kick-student", studentId, (response) => {
-        if (response && response.success) {
-          console.log("Student kicked successfully");
-        } else {
-          console.error(
-            "Failed to kick student:",
-            response ? response.error : "No response"
-          );
-        }
-      });
+      socket.emit("kick-student", studentId);
     }
   };
 
@@ -326,6 +305,7 @@ const App = () => {
     return <Loader />;
   }
 
+  // Show Developer page
   if (showDeveloperPage) {
     return <Developer onBack={() => setShowDeveloperPage(false)} />;
   }
